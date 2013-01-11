@@ -3,7 +3,7 @@ from pypy.rlib.objectmodel import specialize
 
 from execution_model import (W_List, symbol, w_nil, W_Symbol, QuoppaException,
                              W_Vau, W_Primitive, W_Fexpr, w_list,
-                             W_Call, W_FexprCall, W_PrimitiveCall)
+                             W_Call, W_FexprCall, W_PrimitiveCall, W_Eval)
 
 
 @specialize.memo()
@@ -47,8 +47,8 @@ def get_printable_location(stack_w):
 
 class Runtime(object):
     jitdriver = jit.JitDriver(
-        greens=["stack_w"],
-        reds=["self", "env", "w_exp"],
+        greens=["operand_stack_w"],
+        reds=["runtime", "env", "w_exp"],
         get_printable_location=get_printable_location,
     )
 
@@ -117,23 +117,30 @@ class Runtime(object):
 
         return W_Fexpr(env_param, params, static_env, body)
 
-    def m_eval(self, env, w_exp):
+    def interpret(self, env, w_exp):
         if env is w_nil:
             env = self.global_env
-        stack_w = []
+        operand_stack_w = []
+        env_stack = []
+        stack_w_stack = []
         while True:
             self.jitdriver.jit_merge_point(
-                stack_w=stack_w, self=self, env=env, w_exp=w_exp
+                operand_stack_w=operand_stack_w,
+                runtime=self,
+                env=env,
+                w_exp=w_exp
             )
             if isinstance(w_exp, W_List) and not w_exp is w_nil:
-                stack_w.append(W_Call(w_exp.cdr)) # stash arguments
-                w_exp = w_exp.car
-            elif (isinstance(w_exp, W_Fexpr) and stack_w and
-                  isinstance(stack_w[-1], W_Call)):
-                w_operands = stack_w.pop().w_operands
-                w_exp = w_exp.call(self, env, w_operands)
+                w_exp = w_exp.compile(self, env, operand_stack_w)
+            elif (isinstance(w_exp, W_Fexpr) and operand_stack_w and
+                  isinstance(operand_stack_w[-1], W_Call)):
+                w_exp = w_exp.compile(self, env, operand_stack_w)
             elif isinstance(w_exp, W_FexprCall):
-                return self.m_eval(w_exp.env, w_exp.w_body) # new frame
+                env_stack.append(env)
+                stack_w_stack.append(operand_stack_w)
+                operand_stack_w = []
+                env = w_exp.env
+                w_exp = w_exp.w_body
             elif isinstance(w_exp, W_PrimitiveCall):
                 operands_w = []
                 w_operands = w_exp.w_operands
@@ -142,16 +149,22 @@ class Runtime(object):
                     operands_w.append(self.m_eval(w_exp.env, w_operands.car)) # new frame
                     w_operands = w_operands.cdr
                 w_exp = w_exp.execute(operands_w)
-                if not isinstance(w_exp, W_Call):
-                    return w_exp
-            elif len(stack_w) > 0:
-                if isinstance(w_exp, W_Symbol):
-                    cdr = self.lookup(w_exp, env).cdr
-                    assert isinstance(cdr, W_List) and cdr is not w_nil
-                    w_exp = cdr.car
-            elif isinstance(w_exp, W_Symbol):
-                cdr = self.lookup(w_exp, env).cdr
-                assert isinstance(cdr, W_List) and cdr is not w_nil
-                return cdr.car
+                if not isinstance(w_exp, W_Call) and not w_exp is w_nil:
+                    operand_stack_w = stack_w_stack.pop()
+                    env = env_stack.pop()
+            elif isinstance(w_exp, W_Eval):
+                env_stack.append(env)
+                stack_w_stack.append(operand_stack_w)
+                operand_stack_w = []
+                env = w_exp.env
+                w_exp = w_exp.w_exp
+            elif len(operand_stack_w) > 0:
+                w_exp = w_exp.compile(self, env, operand_stack_w)
             else:
-                return w_exp
+                w_exp = w_exp.compile(self, env, operand_stack_w)
+                if w_exp is not w_nil:
+                    operand_stack_w = stack_w_stack.pop()
+                    env = env_stack.pop()
+
+    def m_eval(self, env, w_exp):
+        return W_Eval(env, w_exp)
