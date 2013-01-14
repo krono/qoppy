@@ -30,9 +30,6 @@ class W_Object(object):
     def call(self, runtime, env, operative):
         raise QuoppaException("cannot call %s" % self.to_string())
 
-    def compile(self, runtime, env, stack_w):
-        return self
-
 class W_Undefined(W_Object):
     def to_repr(self):
         return "#<undefined>"
@@ -95,12 +92,6 @@ class W_Symbol(W_Object):
         return self.name
 
     to_string = to_repr
-
-    def compile(self, runtime, env, stack_w):
-        cdr = runtime.lookup(self, env).cdr
-        assert isinstance(cdr, W_List) and cdr is not w_nil
-        return cdr.car
-
 
 def symbol(name):
     #use this to create new symbols, it stores all symbols
@@ -260,10 +251,6 @@ class W_List(W_Object):
             self.cdr.comma(w_pair)
             return self
 
-    def compile(self, runtime, env, stack_w):
-        stack_w.append(W_Call(self.cdr)) # stash arguments
-        return self.car
-
 def w_list(first, *args):
     w_l = W_List(first, w_nil)
     for w_item in list(args):
@@ -293,9 +280,6 @@ class W_Nil(W_List):
 
     cons = comma
 
-    def compile(self, runtime, env, stack_w):
-        return self
-
 w_nil = W_Nil()
 
 class W_Fexpr(W_Object):
@@ -315,10 +299,6 @@ class W_Fexpr(W_Object):
         local_values = W_List(dynamic_env, operands)
         local_env = W_List(runtime.bind(local_names, local_values), self.static_env)
         return W_FexprCall(local_env, self.body)
-
-    def compile(self, runtime, env, stack_w):
-        w_operands = stack_w.pop().w_operands
-        return self.call(runtime, env, w_operands)
 
 class W_Primitive(W_Fexpr):
     @specialize.memo()
@@ -374,8 +354,3 @@ class W_PrimitiveCall(W_Call):
 
     def execute(self, args_w):
         return self.w_primitive.fun(args_w)
-
-class W_Eval(W_Object):
-    def __init__(self, env, w_exp):
-        self.env = env
-        self.w_exp = w_exp
