@@ -36,58 +36,61 @@ def get_runtime():
             "open-input-file": open_input_file
     })
 
-def get_printable_location(stack_w):
-    stack = []
-    for i in stack_w:
-        stack += ("stack is %s" % i.to_string())
-        stack += "\n"
-    return "".join(stack)
-
+def get_printable_location(self, w_exp):
+    # stack = []
+    # for i in stack_w:
+    #     stack += ("stack is %s" % i.to_string())
+    #     stack += "\n"
+    return w_exp.to_string()
 
 
 class Runtime(object):
     jitdriver = jit.JitDriver(
-        greens=[],
-        reds=["self", "env_stack"],
+        greens=["self", "w_exp"],
+        reds=["env_stack", "stack", "operand_stack"],
         get_printable_location=get_printable_location,
     )
+
+    w_underscore = symbol("_")
 
     @specialize.memo()
     def __init__(self, primitives):
         vau = W_Vau(self.vau)
         global_frame = self.bind(symbol("vau"), vau)
-        global_frame.comma(w_list(w_list(symbol("operate"), W_Operate())))
-        global_frame.comma(w_list(w_list(symbol("eval"), W_Eval())))
+        global_frame.comma(w_list([w_list([symbol("operate"), W_Operate()])]))
+        global_frame.comma(w_list([w_list([symbol("eval"), W_Eval()])]))
 
         primitives["lookup"] = self.lookup
         for name in primitives:
             prim = W_Primitive(primitives[name])
-            global_frame.comma(w_list(w_list(symbol(name), prim)))
-        self.global_env = w_list(global_frame)
+            global_frame.comma(w_list([w_list([symbol(name), prim])]))
+        self.global_env = w_list([global_frame])
 
     def bind(self, param, val):
-        if param is w_nil and val is w_nil:
+        if param.is_nil() and val.is_nil():
             return w_nil
         elif isinstance(param, W_Symbol):
-            if param.name == "_":
+            if param is self.w_underscore:
                 return w_nil
             else:
-                return w_list(w_list(param, val))
-        elif param is w_nil:
+                return w_list([w_list([param, val])])
+        elif param.is_nil():
             raise QuoppaException("too many arguments")
-        elif val is w_nil:
+        elif val.is_nil():
             raise QuoppaException("too few arguments")
         elif isinstance(param, W_List) and isinstance(val, W_List):
             return self.bind(param.car, val.car).comma(self.bind(param.cdr, val.cdr))
         else:
             raise QuoppaException("can't bind %s %s" % (param.to_string(), val.to_string()))
 
-    def lookup(self, name, env):
-        if env is w_nil or not isinstance(env, W_List):
-            raise QuoppaException("cannot find %s in %s" % (name.to_string(), env.to_string()))
-        while env is not w_nil:
+    # TODO: Probably wrong, look into this
+    @jit.unroll_safe
+    def lookup(self, w_name, env):
+        if env.is_nil() or not isinstance(env, W_List):
+            raise QuoppaException("cannot find %s in %s" % (w_name.to_string(), env.to_string()))
+        while not env.is_nil():
             frame = env.car
-            while frame is not w_nil:
+            while not frame.is_nil():
                 if not isinstance(frame, W_List):
                     raise QuoppaException("Consistency! Non pair %s as frame" % frame.to_string())
                 pair = frame.car
@@ -95,13 +98,13 @@ class Runtime(object):
                     raise QuoppaException("Consistency! Non pair %s in frame" % pair.to_string())
                 if not isinstance(pair.car, W_Symbol):
                     raise QuoppaException("Consistency! Non symbol %s in pair" % pair.to_string())
-                if pair.car.equal(name):
+                if pair.car.equal(w_name):
                     return pair
                 frame = frame.cdr
             env = env.cdr
             if not isinstance(env, W_List):
                 raise QuoppaException("Consistency! Non cons %s as env cdr" % env.to_string())
-        raise QuoppaException("cannot find %s in env" % name.to_string())
+        raise QuoppaException("cannot find %s in env" % w_name.to_string())
 
     def vau(self, static_env, vau_operands):
         assert isinstance(vau_operands, W_List)
@@ -119,14 +122,25 @@ class Runtime(object):
 
     def interpret(self, env, w_exp):
         stack = w_nil
-        operand_stack = w_list(w_exp)
-        env_stack = w_list(env if env is not w_nil else self.global_env)
-        while operand_stack is not w_nil:
-            self.jitdriver.jit_merge_point(
-                self=self, env_stack=env_stack,
-            )
+        operand_stack = w_list([w_exp])
+        env_stack = w_list([self.global_env if env.is_nil() else env])
+        while not operand_stack.is_nil():
             w_exp = operand_stack.car
+            if isinstance(w_exp, W_Fexpr):
+                self.jitdriver.can_enter_jit(
+                    self=self, w_exp=w_exp,
+                    env_stack=env_stack, stack=stack,
+                    operand_stack=operand_stack
+                )
+            self.jitdriver.jit_merge_point(
+                self=self, w_exp=w_exp,
+                env_stack=env_stack, stack=stack,
+                operand_stack=operand_stack
+            )
             env_stack, stack, operand_stack = w_exp.compile(self, env_stack, stack, operand_stack.cdr)
+            assert isinstance(env_stack, W_List)
+            assert isinstance(stack, W_List)
+            assert isinstance(operand_stack, W_List)
         return stack.car
 
     def execute(self, code):

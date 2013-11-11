@@ -1,3 +1,4 @@
+from pypy.rlib import jit
 from pypy.rlib.objectmodel import specialize
 
 class QuoppaException(Exception):
@@ -29,6 +30,9 @@ class W_Object(object):
 
     def compile(self, runtime, env_stack, stack, operand_stack):
         return env_stack, W_List(self, stack), operand_stack
+
+    def is_nil(self):
+        return False
 
 
 class W_Undefined(W_Object):
@@ -100,8 +104,11 @@ class W_Symbol(W_Object):
 
     def compile(self, runtime, env_stack, stack, operand_stack):
         cdr = runtime.lookup(self, env_stack.car).cdr
-        assert isinstance(cdr, W_List) and cdr is not w_nil
+        assert isinstance(cdr, W_List) and not cdr.is_nil()
         return env_stack, W_List(cdr.car, stack), operand_stack
+
+    def equal(self, w_obj):
+        return self is w_obj
 
 
 def symbol(name):
@@ -226,7 +233,7 @@ class W_List(W_Object):
     def to_lstring(self):
         car = self.car.to_string()
         cdr = self.cdr
-        if cdr is w_nil:
+        if cdr.is_nil():
             return car
         elif isinstance(cdr, W_List): #still proper list
             return car + " " + cdr.to_lstring()
@@ -236,7 +243,7 @@ class W_List(W_Object):
     def to_array(self):
         ary = []
         l = self
-        while l is not w_nil:
+        while not l.is_nil():
             assert isinstance(l, W_List)
             l.append(l.car)
             l.cdr
@@ -248,7 +255,7 @@ class W_List(W_Object):
     def to_lrepr(self):
         car = self.car.to_repr()
         cdr = self.cdr
-        if cdr is w_nil: #end of proper list
+        if cdr.is_nil(): #end of proper list
             return car
         elif isinstance(cdr, W_List): #still proper list
             return car + " " + cdr.to_lrepr()
@@ -264,13 +271,13 @@ class W_List(W_Object):
             self.cdr.equal(w_obj.cdr)
 
     def cons(self, w_pair):
-        if self.cdr is w_nil:
+        if self.cdr.is_nil():
             return W_List(self.car, w_pair)
         else:
             return W_List(self.car, self.cdr.cons(w_pair))
 
     def comma(self, w_pair):
-        if self.cdr is w_nil:
+        if self.cdr.is_nil():
             self.cdr = w_pair
             return self
         else:
@@ -278,12 +285,13 @@ class W_List(W_Object):
             return self
 
     def compile(self, runtime, env_stack, stack, operand_stack):
-        return env_stack, stack, w_list(self.car, W_Call(self.cdr)).comma(operand_stack)
+        return env_stack, stack, w_list([self.car, W_Call(self.cdr)]).comma(operand_stack)
 
 
-def w_list(first, *args):
-    w_l = W_List(first, w_nil)
-    for w_item in list(args):
+@jit.unroll_safe
+def w_list(args):
+    w_l = W_List(args[0], w_nil)
+    for w_item in args[1:]:
         w_l.comma(W_List(w_item, w_nil))
     return w_l
 
@@ -314,6 +322,9 @@ class W_Nil(W_List):
     def compile(self, runtime, env_stack, stack, operand_stack):
         return env_stack, W_List(self, stack), operand_stack
 
+    def is_nil(self):
+        return True
+
 w_nil = W_Nil()
 
 
@@ -324,6 +335,7 @@ class W_PrimitiveCall(W_Object):
     def compile(self, runtime, env_stack, stack, operand_stack):
         operands_w = []
         for i in xrange(self.w_primitive.arg_count):
+            assert isinstance(stack, W_List)
             operands_w.append(stack.car)
             stack = stack.cdr
         w_res = self.w_primitive.fun(operands_w)
@@ -337,11 +349,13 @@ class W_OperateCall(W_PrimitiveCall):
     def compile(self, runtime, env_stack, stack, operand_stack):
         op_env = stack.car
         stack = stack.cdr
+        assert isinstance(stack, W_List)
         fexpr = stack.car
         stack = stack.cdr
+        assert isinstance(stack, W_List)
         operands = stack.car
         stack = stack.cdr
-        return W_List(op_env, env_stack), W_List(operands, stack), w_list(fexpr, W_Return()).comma(operand_stack)
+        return W_List(op_env, env_stack), W_List(operands, stack), w_list([fexpr, W_Return()]).comma(operand_stack)
 
     def to_repr(self):
         return "#<operate>"
@@ -351,9 +365,10 @@ class W_EvalCall(W_PrimitiveCall):
     def compile(self, runtime, env_stack, stack, operand_stack):
         eval_env = stack.car
         stack = stack.cdr
+        assert isinstance(stack, W_List)
         w_exp = stack.car
         stack = stack.cdr
-        return W_List(eval_env, env_stack), stack, w_list(w_exp, W_Return()).comma(operand_stack)
+        return W_List(eval_env, env_stack), stack, w_list([w_exp, W_Return()]).comma(operand_stack)
 
     def to_repr(self):
         return "#<eval>"
@@ -401,7 +416,7 @@ class W_Fexpr(W_Object):
         local_values = W_List(env_stack.car, w_operands)
         local_env = W_List(runtime.bind(local_names, local_values), self.static_env)
 
-        return W_List(local_env, env_stack), stack, w_list(self.body, W_Return()).comma(operand_stack)
+        return W_List(local_env, env_stack), stack, w_list([self.body, W_Return()]).comma(operand_stack)
 
 
 class W_BasePrimitive(W_Fexpr):
@@ -410,16 +425,13 @@ class W_BasePrimitive(W_Fexpr):
     def __init__(self):
         self.arg_count = 0
 
-    def to_string(self):
-        return "#<a primitive>"
-    to_repr = to_string
-
+    @jit.unroll_safe
     def compile(self, runtime, env_stack, stack, operand_stack):
         argcount = 0
         w_operands = stack.car
         stack = stack.cdr
         operand_stack = W_List(self.CallClass(self), operand_stack)
-        while w_operands is not w_nil:
+        while not w_operands.is_nil():
             assert isinstance(w_operands, W_List)
             operand_stack = W_List(w_operands.car, operand_stack)
             w_operands = w_operands.cdr
@@ -456,6 +468,11 @@ class W_Primitive(W_BasePrimitive):
         exec source in namespace
         self.arg_count = arg_count
         self.fun = namespace[fun.__name__]
+        self.name = fun.__name__
+
+    def to_string(self):
+        return "#<primitive %s>" % self.name
+    to_repr = to_string
 
 
 class W_Vau(W_Primitive):
@@ -464,6 +481,10 @@ class W_Vau(W_Primitive):
         stack = stack.cdr
         return env_stack, W_List(self.fun([env_stack.car, w_operands]), stack), operand_stack
 
+    def to_string(self):
+        return "#<primitive vau>"
+    to_repr = to_string
+
 
 class W_Operate(W_BasePrimitive):
     CallClass = W_OperateCall
@@ -471,9 +492,17 @@ class W_Operate(W_BasePrimitive):
     def __init__(self):
         self.arg_count = 3
 
+    def to_string(self):
+        return "#<primitive operate>"
+    to_repr = to_string    
+
 
 class W_Eval(W_BasePrimitive):
     CallClass = W_EvalCall
 
     def __init__(self):
         self.arg_count = 2
+
+    def to_string(self):
+        return "#<primitive eval>"
+    to_repr = to_string    
